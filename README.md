@@ -24,7 +24,7 @@ This repository contains the code accompanying the paper "Deep Generative Classi
 1. **Clone the repository:**
 
    ```
-   git clone https://github.com/Deltadahl/CytoDiffusion.git
+   git clone git@github.com:Deltadahl/CytoDiffusion.git
    cd CytoDiffusion
    ```
 
