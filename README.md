@@ -35,12 +35,26 @@ This repository contains the code accompanying the paper "Deep Generative Classi
    conda activate CytoDiffusion
    ```
 
-3. **Configure Accelerate and log in to Weights & Biases (wandb):**
-
+3. **Configure Accelerate:**
+   Run the following command:
    ```
    accelerate config
+   ```
+   When prompted, provide these answers for a simple single GPU setup:
+   - Compute environment: This machine
+   - Machine type: No distributed training
+   - Run training on CPU only: NO
+   - Optimize script with torch dynamo: NO
+   - Use DeepSpeed: NO
+   - GPU(s) to use: 0
+   - Enable numa efficiency: NO
+   - Use mixed precision: fp16
+
+4. **Log in to Weights & Biases (wandb):**
+   ```
    wandb login
    ```
+   Follow the prompts to complete the login process.
 
 ### Running the Example Code
 
