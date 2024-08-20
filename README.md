@@ -1,6 +1,6 @@
 # Deep Generative Classification of Blood Cell Morphology
 
-This repository contains the code accompanying the paper "Deep Generative Classification of Blood Cell Morphology", which is published as a preprint on arXiv and is currently under peer review. The code demonstrates the application of diffusion-based models for classification tasks, with a focus on blood cell morphology. It provides a foundation for reproducing key findings and offers a framework for further exploration in this area.
+This repository contains the code accompanying the paper ["Deep Generative Classification of Blood Cell Morphology"](https://arxiv.org/abs/2408.08982), which is published as a preprint on arXiv and is currently under peer review. The code demonstrates the application of diffusion-based models for classification tasks, with a focus on blood cell morphology. It provides a foundation for reproducing key findings and offers a framework for further exploration in this area.
 
 ## Key Features
 
@@ -140,7 +140,7 @@ The code is tested on the following datasets:
 * **PBC Dataset:**  Acevedo et al. [A dataset of microscopic peripheral blood cell images for development of automatic recognition systems](https://www.sciencedirect.com/science/article/pii/S2352340920303681)
 * **Raabin-WBC Dataset:** Kouzehkanan et al. [A large dataset of white blood cells containing cell locations and types, along with segmented nuclei and cytoplasm](https://www.nature.com/articles/s41598-021-04426-x)
 * **Bodzas Dataset:** Bodzas et al. [A high-resolution large-scale dataset of pathological and normal white blood cells](https://europepmc.org/article/MED/37468490)
-* **Our Custom Dataset:** (Details provided in our paper)
+* **Our Custom Dataset:** See [our paper](https://arxiv.org/abs/2408.08982)
 
 ## Expected Performance
 
