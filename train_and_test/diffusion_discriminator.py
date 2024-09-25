@@ -35,11 +35,11 @@ from accelerate.logging import get_logger
 from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset, load_from_disk
-from huggingface_hub import create_repo, upload_folder
+from huggingface_hub import create_repo
 from packaging import version
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel
 from transformers.utils import ContextManagers
 import diffusers
 from diffusers import (
@@ -47,42 +47,35 @@ from diffusers import (
     DDPMScheduler,
     StableDiffusionPipeline,
     UNet2DConditionModel,
-    PNDMScheduler,
-    LMSDiscreteScheduler,
 )
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel, compute_snr
-from diffusers.utils import check_min_version, deprecate, is_wandb_available, make_image_grid
+from diffusers.utils import (
+    check_min_version,
+    deprecate,
+    is_wandb_available,
+)
 from diffusers.utils.import_utils import is_xformers_available
 from torchvision.transforms import functional as TF
 from PIL import Image
-import glob
 import re
 import matplotlib.pyplot as plt
 from torch import autocast
 from scipy.stats import ttest_rel
 import matplotlib.colors as mcolors
 from PIL import ImageFile
-ImageFile.LOAD_TRUNCATED_IMAGES = True
-import time
 import io
-from torch.utils.data import WeightedRandomSampler
-from torch.utils.data import Sampler
-from collections import defaultdict
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_curve, auc
-import pickle
 import scipy.stats as stats
 from matplotlib.patches import Patch
 from random import Random
-from scipy.stats import gaussian_kde, wasserstein_distance
+from scipy.stats import gaussian_kde
 import pandas as pd
 import uuid
 from torchvision.transforms import RandAugment
-from scipy import stats
 from sklearn.metrics import roc_auc_score
-from sklearn.preprocessing import StandardScaler
 import seaborn as sns
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 if is_wandb_available():
@@ -97,6 +90,7 @@ DATASET_NAME_MAPPING = {
     "lambdalabs/pokemon-blip-captions": ("image", "text"),
 }
 
+
 def str_to_float_list(s):
     try:
         # Convert string representation of list into actual list
@@ -108,19 +102,6 @@ def str_to_float_list(s):
     except:
         raise argparse.ArgumentTypeError("Input must be a list of floats or integers")
 
-
-# def convert_dim(caption, target_shape=(77, 768)):
-#     caption = np.array(caption)
-#     # Initialize a 2D array of zeros with the desired final shape
-#     final_array = np.zeros(target_shape)
-#     # Determine the length of the caption to be inserted
-#     assert target_shape[1] >= len(caption)
-#     caption_len = len(caption)
-#     # Insert the caption into the beginning of the final_array for all rows
-#     for i in range(target_shape[0]):
-#         final_array[i, 0:caption_len] = caption
-#     final_array = np.array(final_array)
-#     return final_array
 
 def convert_dim(caption, target_shape=(77, 768)):
     caption = np.array(caption)
@@ -141,7 +122,7 @@ def convert_dim(caption, target_shape=(77, 768)):
 
     # Fill the remaining elements in the next row
     if remaining_elements > 0:
-        final_array[num_full_rows, :remaining_elements] = caption[num_full_rows * target_shape[1]:]
+        final_array[num_full_rows, :remaining_elements] = caption[num_full_rows * target_shape[1] :]
 
     # Repeat the filled rows until the target shape is reached
     num_filled_rows = num_full_rows + (1 if remaining_elements > 0 else 0)
@@ -149,6 +130,7 @@ def convert_dim(caption, target_shape=(77, 768)):
         final_array[i, :] = final_array[i % num_filled_rows, :]
 
     return final_array
+
 
 class RandHistogramShift:
     def __init__(self, hist_shift_prob, num_control_points=10):
@@ -189,18 +171,23 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-    vae=accelerator.unwrap_model(vae_orig)
-    unet=accelerator.unwrap_model(unet_orig)
+    vae = accelerator.unwrap_model(vae_orig)
+    unet = accelerator.unwrap_model(unet_orig)
 
     images_val_prompts = []
     # Generate images for the validation prompts to see how well the model can generate images from the prompts
     if args.validation_prompts:
         for k in range(len(args.validation_prompts)):
             latents = torch.randn(
-                (1, unet.config.in_channels, args.resolution // 8, args.resolution // 8),
-                    generator=generator,
+                (
+                    1,
+                    unet.config.in_channels,
+                    args.resolution // 8,
+                    args.resolution // 8,
+                ),
+                generator=generator,
             ).to(accelerator.device, dtype=weight_dtype)
-            latents = (latents * scheduler.init_noise_sigma)
+            latents = latents * scheduler.init_noise_sigma
 
             with torch.autocast("cuda"):
                 real_input = args.validation_prompts[k]
@@ -250,43 +237,41 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
     def pil_to_latent_color_jitter(input_im, angle, horizontal_flip, diagonal_mirror):
         """Apply a sequence of transformations to the image."""
-        if input_im.mode != 'RGB':
-            input_im = input_im.convert('RGB')
+        if input_im.mode != "RGB":
+            input_im = input_im.convert("RGB")
 
-        preprocess = transforms.Compose([
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
-            RandHistogramShift(args.hist_shift_prob),
-            transforms.ColorJitter(brightness=args.jitter_strength, contrast=args.jitter_strength,
-                                saturation=args.jitter_strength, hue=(args.jitter_strength/2)),
-            transforms.RandomGrayscale(p=args.random_gray_probability),
-            transforms.Lambda(lambda x: RandAugment()(x)) if args.random_augment_validation else transforms.Lambda(lambda x: x),
-            transforms.Lambda(lambda x: flip_image_horizontally(x, horizontal_flip)),
-            transforms.Lambda(lambda x: diagonal_mirror_image(x, diagonal_mirror)),
-            transforms.ToTensor(),  # Convert to tensor
-            transforms.Lambda(lambda x: rotate_image(x, angle)),
-            lambda x: x.unsqueeze(0).to(accelerator.device, dtype=weight_dtype) * 2 - 1,
-        ])
+        preprocess = transforms.Compose(
+            [
+                transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
+                RandHistogramShift(args.hist_shift_prob),
+                transforms.ColorJitter(
+                    brightness=args.jitter_strength,
+                    contrast=args.jitter_strength,
+                    saturation=args.jitter_strength,
+                    hue=(args.jitter_strength / 2),
+                ),
+                transforms.RandomGrayscale(p=args.random_gray_probability),
+                transforms.Lambda(lambda x: RandAugment()(x))
+                if args.random_augment_validation
+                else transforms.Lambda(lambda x: x),
+                transforms.Lambda(lambda x: flip_image_horizontally(x, horizontal_flip)),
+                transforms.Lambda(lambda x: diagonal_mirror_image(x, diagonal_mirror)),
+                transforms.ToTensor(),  # Convert to tensor
+                transforms.Lambda(lambda x: rotate_image(x, angle)),
+                lambda x: x.unsqueeze(0).to(accelerator.device, dtype=weight_dtype) * 2 - 1,
+            ]
+        )
 
         # Apply the transformations and encode
         latent = vae.encode(preprocess(input_im))
         return vae.config.scaling_factor * latent.latent_dist.sample()
 
-    # NOTE: Feel free to change this dict if you are using other classes/data
-    category_to_number = {
-        "basophil": 0,
-        "blast": 1,
-        "lymphocyte": 2,
-        "monocyte": 3,
-        "neutrophil": 4,
-        "erythroblast": 5,
-        "eosinophil": 6,
-        "immature granulocyte": 7,
-        "platelet": 8,
-        "artefact": 9,
-    }
+    # def load_name_to_number(file_path):
+    if args.category_to_number is not None:
+        with open(args.category_to_number, "r") as f:
+            category_to_number = json.load(f)
 
-    number_to_category = {v: k for k, v in category_to_number.items()}
     all_classification_images = []
     all_heatmaps_images = []
     correct_tracker = []
@@ -301,7 +286,7 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
     print(f"args.classes_to_skip_for_validation {args.classes_to_skip_for_validation}")
     # Iterate through the subdirectories and files in the base directory
-    for class_name in sorted(os.listdir(args.validation_img_dir)):
+    for class_name in sorted(os.listdir(args.validation_img_dir), key=lambda x: int(x)):
         class_dir = os.path.join(args.validation_img_dir, class_name)
         if os.path.isdir(class_dir):
             for image_name in os.listdir(class_dir):
@@ -310,16 +295,27 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                     # Add the image path to the list
                     image_paths.append(image_path)
 
-                    class_name_processed = class_name.replace("_", " ")
+                    class_name_processed = class_name
 
-                    for key, value in category_to_number.items():
-                        class_name_processed = class_name_processed.replace(str(value), key)
+                    if args.category_to_number is not None:
+                        for key, value in category_to_number.items():
+                            if class_name == str(value):
+                                class_name_processed = key
+                                break
 
-                    json_filename = re.sub(r'\.png|\.jpeg|\.jpg|\.bmp|\.tiff|\.tif', '.json', image_name, flags=re.IGNORECASE)
-                    assert json_filename.endswith('.json'), f"File {json_filename} does not end with .json"
+                    json_filename = re.sub(
+                        r"\.png|\.jpeg|\.jpg|\.bmp|\.tiff|\.tif",
+                        ".json",
+                        image_name,
+                        flags=re.IGNORECASE,
+                    )
+                    assert json_filename.endswith(".json"), f"File {json_filename} does not end with .json"
 
-                    json_path = os.path.join(args.validation_prompt_dir, os.path.join(class_name, json_filename))
-                    with open(json_path, 'r') as file:
+                    json_path = os.path.join(
+                        args.validation_prompt_dir,
+                        os.path.join(class_name, json_filename),
+                    )
+                    with open(json_path, "r") as file:
                         prompt = json.load(file)
                         assert isinstance(prompt, list), "Prompt is not a list"
 
@@ -332,23 +328,31 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
     if args.unique_prompts_to_add is not None:
         for prompt in args.unique_prompts_to_add:
+
             if prompt not in unique_prompts:
                 unique_prompts.append(prompt)
-                unique_prompts_short.append(prompt)
+                assert args.category_to_number is not None, "Category to number is not provided"
+                for key, value in category_to_number.items():
+                    if value < len(prompt):
+                        assert np.sum(prompt) == 1, "Prompt is not one hot encoded"
+                        if np.argmax(prompt) == value:
+                            unique_prompts_short.append(key)
+                            break
 
-
-    text_embeddings = torch.tensor(np.array([convert_dim(unique_prompts[i]) for i in range(len(unique_prompts))])).to(accelerator.device, dtype=weight_dtype)
+    text_embeddings = torch.tensor(np.array([convert_dim(unique_prompts[i]) for i in range(len(unique_prompts))])).to(
+        accelerator.device, dtype=weight_dtype
+    )
 
     n_noise_lvls = args.n_noise_lvls
     if args.min_noise_trials is None:
         min_noise_trials = n_noise_lvls
     else:
-        min_noise_trials = args.min_noise_trials   # same if we are not pruning away unlikely classes
+        min_noise_trials = args.min_noise_trials  # same if we are not pruning away unlikely classes
     n_image_rounds = args.n_image_rounds
 
-    batch_size = 15
+    batch_size = 128
     num_inference_steps_classification = 1000
-    noise_list = np.linspace(1, num_inference_steps_classification-1, n_noise_lvls, dtype=int)
+    noise_list = np.linspace(1, num_inference_steps_classification - 1, n_noise_lvls, dtype=int)
     random.shuffle(noise_list)
 
     scheduler.set_timesteps(num_inference_steps_classification)
@@ -382,7 +386,14 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
     for image_round in range(n_image_rounds):
         for correct_index, prompt in enumerate(unique_prompts):
             if heatmap_count < args.n_heatmap_images:
-                heatmap_error = torch.zeros((n_classes + 1, unet.config.in_channels, args.resolution // 8, args.resolution // 8)).to(accelerator.device, dtype=weight_dtype)
+                heatmap_error = torch.zeros(
+                    (
+                        n_classes + 1,
+                        unet.config.in_channels,
+                        args.resolution // 8,
+                        args.resolution // 8,
+                    )
+                ).to(accelerator.device, dtype=weight_dtype)
             else:
                 heatmap_error = None
 
@@ -414,7 +425,15 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
             with tqdm(enumerate(noise_list), total=len(noise_list)) as pbar:
                 for noise_idx, start_step in pbar:
-                    single_noise = torch.randn((1, unet.config.in_channels, args.resolution // 8, args.resolution // 8), generator=generator).to(accelerator.device)
+                    single_noise = torch.randn(
+                        (
+                            1,
+                            unet.config.in_channels,
+                            args.resolution // 8,
+                            args.resolution // 8,
+                        ),
+                        generator=generator,
+                    ).to(accelerator.device)
                     noise = single_noise.repeat(n_classes, 1, 1, 1)  # using the same noise for all prompts
 
                     diagonal_mirror = False
@@ -430,27 +449,39 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
                     encoded = pil_to_latent_color_jitter(input_image, angle, horizontal_flip, diagonal_mirror)
 
-                    latents = scheduler.add_noise(encoded, noise, timesteps=torch.tensor([scheduler.timesteps[start_step]]))
+                    latents = scheduler.add_noise(
+                        encoded,
+                        noise,
+                        timesteps=torch.tensor([scheduler.timesteps[start_step]]),
+                    )
                     latents = latents.to(accelerator.device, dtype=weight_dtype)
                     with autocast("cuda"):
-                        noise_pred = torch.zeros((n_classes, unet.config.in_channels, args.resolution // 8, args.resolution // 8), dtype=unet.dtype).to(accelerator.device)
+                        noise_pred = torch.zeros(
+                            (
+                                n_classes,
+                                unet.config.in_channels,
+                                args.resolution // 8,
+                                args.resolution // 8,
+                            ),
+                            dtype=unet.dtype,
+                        ).to(accelerator.device)
 
                         t = scheduler.timesteps[start_step]
                         latent_model_input = scheduler.scale_model_input(latents, t)
                         for i in range(0, len(indices_to_update), batch_size):
-                            batch_indices = indices_to_update[i:i+batch_size]
+                            batch_indices = indices_to_update[i : i + batch_size]
                             with torch.no_grad():
                                 noise_pred[batch_indices, :, :, :] = unet(
                                     latent_model_input[batch_indices, :, :, :],
                                     t,
-                                    encoder_hidden_states=text_embeddings[batch_indices, :, :]
+                                    encoder_hidden_states=text_embeddings[batch_indices, :, :],
                                 ).sample
 
                     # NOTE: This mask is used to only consider the pixels inside the circle. If you do want to take the loss of the whole image, you can remove this mask or just set the radius to a large number.
                     H, W = args.resolution // 8, args.resolution // 8
                     radius = args.radius
                     # Create a grid of coordinates
-                    Y, X = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+                    Y, X = torch.meshgrid(torch.arange(H), torch.arange(W), indexing="ij")
                     center_x, center_y = W // 2, H // 2
                     # Calculate the distance of each pixel from the center
                     dist_from_center = torch.sqrt((X - center_x) ** 2 + (Y - center_y) ** 2)
@@ -469,6 +500,7 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                         masked_original = original * mask
 
                         if heatmap_count < args.n_heatmap_images:
+
                             def rotate_tensor(tensor, angle):
                                 rotated_images = []
                                 for image in tensor:
@@ -487,24 +519,38 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                             if horizontal_flip:
                                 for j in range(4):
                                     # Flip horizontally
-                                    masked_generated[0,j,:,:] = torch.flip(masked_generated[0,j,:,:], [1])
-                                    masked_original[0,j,:,:] = torch.flip(masked_original[0,j,:,:], [1])
+                                    masked_generated[0, j, :, :] = torch.flip(masked_generated[0, j, :, :], [1])
+                                    masked_original[0, j, :, :] = torch.flip(masked_original[0, j, :, :], [1])
                             if diagonal_mirror:
                                 for j in range(4):
                                     # diagonal mirror
-                                    masked_generated[0,j,:,:] = torch.rot90(torch.flip(masked_generated[0,j,:,:], [1]), 1, [0, 1])
-                                    masked_original[0,j,:,:] = torch.rot90(torch.flip(masked_original[0,j,:,:], [1]), 1, [0, 1])
+                                    masked_generated[0, j, :, :] = torch.rot90(
+                                        torch.flip(masked_generated[0, j, :, :], [1]),
+                                        1,
+                                        [0, 1],
+                                    )
+                                    masked_original[0, j, :, :] = torch.rot90(
+                                        torch.flip(masked_original[0, j, :, :], [1]),
+                                        1,
+                                        [0, 1],
+                                    )
 
-                            heatmap_error[prompt_idx,:,:,:] += (masked_original[0,:,:,:] - masked_generated[0,:,:,:]) / n_noise_lvls
+                            heatmap_error[prompt_idx, :, :, :] += (
+                                masked_original[0, :, :, :] - masked_generated[0, :, :, :]
+                            ) / n_noise_lvls
 
-                        normalise = False  # Not used at the moment, but this can be used to normalise the mse values to N(0,1)
+                        normalise = (
+                            False  # Not used at the moment, but this can be used to normalise the mse values to N(0,1)
+                        )
                         if args.use_snr_weighting:
                             # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
                             # Since we predict the noise instead of x_0, the original formulation is slightly changed.
                             # This is discussed in Section 4.2 of the same paper.
 
                             snr = compute_snr(scheduler, t)
-                            mse_loss_weights = torch.min(snr, args.snr_gamma * torch.ones_like(torch.ones(1))).to(accelerator.device, dtype=weight_dtype)
+                            mse_loss_weights = torch.min(snr, args.snr_gamma * torch.ones_like(torch.ones(1))).to(
+                                accelerator.device, dtype=weight_dtype
+                            )
                             if scheduler.config.prediction_type == "epsilon":
                                 mse_loss_weights = mse_loss_weights / snr
                             elif scheduler.config.prediction_type == "v_prediction":
@@ -512,7 +558,7 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
                             loss = F.mse_loss(masked_original, masked_generated, reduction="sum")
                             loss_saver[noise_idx, prompt_idx] += loss.item()
-                            mse_latant_lists[noise_idx, prompt_idx] += loss.item() * mse_loss_weights
+                            mse_latant_lists[noise_idx, prompt_idx] = loss.item() * mse_loss_weights
                         else:
                             loss = F.mse_loss(masked_original, masked_generated, reduction="sum")
                             loss_saver[noise_idx, prompt_idx] += loss.item()
@@ -520,7 +566,13 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                             def poly4(t):
                                 a_arr = args.poly_coeff
                                 if a_arr is None:
-                                    a_arr_new =  [0.9270553940204841, 9.836536887830196, -4.6840608002246205, 6.018538389994896, -9.339786177681749]
+                                    a_arr_new = [
+                                        0.9270553940204841,
+                                        9.836536887830196,
+                                        -4.6840608002246205,
+                                        6.018538389994896,
+                                        -9.339786177681749,
+                                    ]
                                     a0, a1, a2, a3, a4 = a_arr_new
                                     return a0 + a1 * t + a2 * t**2 + a3 * t**3 + a4 * t**4
 
@@ -538,46 +590,49 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                                 weight = 1 / (poly_value + epsilon)
 
                                 assert weight >= 0, f"Weight is negative: {weight}"
-                                return max(weight,0)
+                                return max(weight, 0)
 
                             weight = custom_weighting_poly4()
-                            mse_latant_lists[noise_idx, prompt_idx] += loss.item() * weight
+                            mse_latant_lists[noise_idx, prompt_idx] = loss.item() * weight
 
                     if normalise:
                         row_mean = np.mean(mse_latant_lists[noise_idx, indices_to_update])
                         row_std = np.std(mse_latant_lists[noise_idx, indices_to_update])
                         if row_std > 0:  # To avoid division by zero
-                            mse_latent_normalized[noise_idx, indices_to_update] = (mse_latant_lists[noise_idx, indices_to_update] - row_mean) / row_std
+                            mse_latent_normalized[noise_idx, indices_to_update] = (
+                                mse_latant_lists[noise_idx, indices_to_update] - row_mean
+                            ) / row_std
                         else:
                             # Handle the case where the std is 0; it means all values in the row are the same.
-                            mse_latent_normalized[noise_idx, indices_to_update] = mse_latant_lists[noise_idx, indices_to_update] - row_mean
+                            mse_latent_normalized[noise_idx, indices_to_update] = (
+                                mse_latant_lists[noise_idx, indices_to_update] - row_mean
+                            )
 
                     # Subtract the minimum value from all elements in the row
                     row_min = np.min(mse_latant_lists[noise_idx, indices_to_update])
-                    mse_latent_normalized[noise_idx, indices_to_update] = mse_latant_lists[noise_idx, indices_to_update] - row_min
+                    mse_latent_normalized[noise_idx, indices_to_update] = (
+                        mse_latant_lists[noise_idx, indices_to_update] - row_min
+                    )
 
                     # for the values not in indices_to_update, set them to the mean of all previous rows
                     for i in range(n_classes):
                         if i not in indices_to_update:
+                            assert noise_idx > 0, "This should not happen"
                             mse_latent_normalized[noise_idx, i] = mse_latent_normalized[:noise_idx, i].sum() / noise_idx
 
                     nr_updates_per_index[indices_to_update] += 1
                     if not normalise:
-                        mask = mse_latent_normalized > 0
-                        mask[-1, :] = 0
-                        denominator = 1
-                        for i in indices_to_update:
-                            mse_latent_normalized[-1, i] = mse_latent_normalized[:-1, i].sum() / (denominator * nr_updates_per_index[i])
+                        mse_latent_normalized[-1, :] = np.sum(mse_latent_normalized[:-1, :], axis=0) / (noise_idx + 1)
+                        mse_latent_normalized[-1, :] /= np.mean(mse_latent_normalized[-1, :])
 
                     mse_values_formatted = [f"{val:.2f}" for val in mse_latent_normalized[-1, indices_to_update]]
                     pbar.set_postfix({"mse": mse_values_formatted}, refresh=True)
 
                     # Sort indices based on mse values and then by index to ensure determinism
-                    sorted_indices = sorted(range(len(mse_latent_normalized[-1, :])),
-                                            key=lambda x: (mse_latent_normalized[-1, x], x))
-
-                    # Using the sorted indices to get the sorted values
-                    sorted_values = [mse_latent_normalized[-1, i] for i in sorted_indices]
+                    sorted_indices = sorted(
+                        range(len(mse_latent_normalized[-1, :])),
+                        key=lambda x: (mse_latent_normalized[-1, x], x),
+                    )
 
                     # Create a mapping from original indices to new sorted indices
                     index_map = {original_idx: new_idx for new_idx, original_idx in enumerate(sorted_indices)}
@@ -599,12 +654,17 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                             if class_idx == most_probable_class_idx:
                                 continue
                             # Perform a dependent t-test comparing each class to the most probable class
-                            stat, p_value = ttest_rel(mse_latent_normalized[:noise_idx + 1, class_idx],
-                                                    mse_latent_normalized[:noise_idx + 1, most_probable_class_idx])
+                            stat, p_value = ttest_rel(
+                                mse_latent_normalized[: noise_idx + 1, class_idx],
+                                mse_latent_normalized[: noise_idx + 1, most_probable_class_idx],
+                            )
 
                             if p_value < 2e-3:
                                 # remove the class if it significantly differs (and performs worse) than the most probable class
-                                if mse_latent_normalized[-1, class_idx] > mse_latent_normalized[-1, most_probable_class_idx]:
+                                if (
+                                    mse_latent_normalized[-1, class_idx]
+                                    > mse_latent_normalized[-1, most_probable_class_idx]
+                                ):
                                     indices_to_remove.append(class_idx)
 
                         # Remove all indices that meet the criteria
@@ -624,7 +684,9 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                 for prompt_idx in range(n_classes):
                     fontsize = 18
                     latents = heatmap_error[prompt_idx].unsqueeze(0)
-                    latents = (1 / vae.config.scaling_factor) * latents * 28  # Arbitrary scaling factor, adjust as needed
+                    latents = (
+                        (1 / vae.config.scaling_factor) * latents * 28
+                    )  # Arbitrary scaling factor, adjust as needed
 
                     with torch.no_grad():
                         latents = latents.to(dtype=weight_dtype)
@@ -637,7 +699,7 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                     image = pil_images[0]
 
                     def rgb2gray(rgb):
-                        return np.dot(rgb[..., :3], [1/3, 1/3, 1/3])
+                        return np.dot(rgb[..., :3], [1 / 3, 1 / 3, 1 / 3])
 
                     # Normalize the image
                     def normalize_fixed_range(gray_image, min_val=0, max_val=255):
@@ -646,33 +708,39 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                     image_np = np.array(image)
                     gray_image = rgb2gray(image_np)
                     gray_image_normalized = normalize_fixed_range(gray_image)
-                    cmap_colors = [(0.267004, 0.004874, 0.329415, 1.0), (0.190631, 0.407061, 0.556089, 1.0), (0.20803, 0.718701, 0.472873, 1.0), (0.993248, 0.906157, 0.143936, 1.0)]
+                    cmap_colors = [
+                        (0.267004, 0.004874, 0.329415, 1.0),
+                        (0.190631, 0.407061, 0.556089, 1.0),
+                        (0.20803, 0.718701, 0.472873, 1.0),
+                        (0.993248, 0.906157, 0.143936, 1.0),
+                    ]
 
                     from matplotlib.colors import LinearSegmentedColormap
+
                     custom_cmap = LinearSegmentedColormap.from_list("blue_to_white", cmap_colors, N=256)
                     viridis_image = custom_cmap(gray_image_normalized)[:, :, :3]  # Take only RGB, ignore alpha
                     channel_stats = [
-                        {'mean': 0.16519577 , 'std': 0.0337721},
-                        {'mean': 0.49670708, 'std': 0.0639124},
-                        {'mean': 0.54763337, 'std': 0.02108916}
+                        {"mean": 0.16519577, "std": 0.0337721},
+                        {"mean": 0.49670708, "std": 0.0639124},
+                        {"mean": 0.54763337, "std": 0.02108916},
                     ]
 
                     k = 3.5  # Threshold factor, arbitrary value, adjust as needed
                     masks = []
                     for i, statsistics in enumerate(channel_stats):
-                        lower_thresh = statsistics['mean'] - k * statsistics['std']
-                        upper_thresh = statsistics['mean'] + k * statsistics['std']
+                        lower_thresh = statsistics["mean"] - k * statsistics["std"]
+                        upper_thresh = statsistics["mean"] + k * statsistics["std"]
                         # Create mask for current channel
-                        channel_mask = (viridis_image[:,:,i] > lower_thresh) & (viridis_image[:,:,i] < upper_thresh)
+                        channel_mask = (viridis_image[:, :, i] > lower_thresh) & (viridis_image[:, :, i] < upper_thresh)
                         masks.append(channel_mask)
 
                     # Combine masks for all channels (logical AND across all channel masks)
                     final_mask = np.logical_and.reduce(masks)
 
                     # check if input_image is rgb, with 3 channels, otherwise print path to image
-                    if input_image.mode != 'RGB':
+                    if input_image.mode != "RGB":
                         print(f"Image {selected_img_path} is not RGB, but {input_image.mode}")
-                        input_image = input_image.convert('RGB')
+                        input_image = input_image.convert("RGB")
 
                     # Overlay heatmap on the real image
                     input_image_np = np.array(input_image)  # Convert tensor to numpy if not already
@@ -680,7 +748,7 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                     viridis_scaled = viridis_image * 255
 
                     # Create the mixed image
-                    mixed_image = (lambda_ * input_image_np + (1 - lambda_) * viridis_scaled).astype('uint8')
+                    mixed_image = (lambda_ * input_image_np + (1 - lambda_) * viridis_scaled).astype("uint8")
 
                     # Initialize the overlay image with the mixed image
                     overlay = np.copy(mixed_image)
@@ -690,67 +758,76 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
                     # Plot original, heatmap, and overlay in the respective subplots
                     axs[prompt_idx, 0].imshow(input_image)
-                    axs[prompt_idx, 0].axis('off')
-                    axs[prompt_idx, 0].set_title(f'Original Image, class: "{unique_prompts_short[correct_index]}"', fontsize=fontsize)
+                    axs[prompt_idx, 0].axis("off")
+                    axs[prompt_idx, 0].set_title(
+                        f'Original Image, class: "{unique_prompts_short[correct_index]}"',
+                        fontsize=fontsize,
+                    )
 
                     axs[prompt_idx, 1].imshow(viridis_image)
-                    axs[prompt_idx, 1].axis('off')
-                    axs[prompt_idx, 1].set_title(f'Heatmap for prompt "{unique_prompts_short[prompt_idx]}"', fontsize=fontsize)
+                    axs[prompt_idx, 1].axis("off")
+                    axs[prompt_idx, 1].set_title(
+                        f'Heatmap for prompt "{unique_prompts_short[prompt_idx]}"',
+                        fontsize=fontsize,
+                    )
 
                     # Calculate the mean heatmap error image across the channels
                     mean_heatmap_error = torch.mean(heatmap_error[prompt_idx], dim=0)
 
-                    axs[prompt_idx, 3].imshow(mean_heatmap_error.cpu().float().numpy(), cmap='viridis')
-                    axs[prompt_idx, 3].axis('off')
-                    axs[prompt_idx, 3].set_title('Mean Heatmap in latent space', fontsize=fontsize)
+                    axs[prompt_idx, 3].imshow(mean_heatmap_error.cpu().float().numpy(), cmap="viridis")
+                    axs[prompt_idx, 3].axis("off")
+                    axs[prompt_idx, 3].set_title("Mean Heatmap in latent space", fontsize=fontsize)
 
                     axs[prompt_idx, 2].imshow(overlay)
-                    axs[prompt_idx, 2].axis('off')
-                    axs[prompt_idx, 2].set_title('Overlay of Heatmap on Original', fontsize=fontsize)
+                    axs[prompt_idx, 2].axis("off")
+                    axs[prompt_idx, 2].set_title("Overlay of Heatmap on Original", fontsize=fontsize)
 
                     if args.save_heatmaps_locally:
                         # Save original image
-                        original_dir_path = f'heatmaps/original/correct_{unique_prompts_short[correct_index]}'
+                        original_dir_path = f"heatmaps/original/correct_{unique_prompts_short[correct_index]}"
                         os.makedirs(original_dir_path, exist_ok=True)
 
                         # Save heatmap as RGB image
-                        heatmap_dir_path = f'heatmaps/rgb/correct_{unique_prompts_short[correct_index]}/conditioned_{unique_prompts_short[prompt_idx]}'
-                        heatmap_dir_path_raw = f'heatmaps/rgb_raw/correct_{unique_prompts_short[correct_index]}/conditioned_{unique_prompts_short[prompt_idx]}'
-                        heatmap_dir_path_matlab = f'heatmaps/matlab/correct_{unique_prompts_short[correct_index]}/conditioned_{unique_prompts_short[prompt_idx]}'
-                        heatmap_dir_path_matlab_raw = f'heatmaps/matlab_raw/correct_{unique_prompts_short[correct_index]}/conditioned_{unique_prompts_short[prompt_idx]}'
+                        heatmap_dir_path = f"heatmaps/rgb/correct_{unique_prompts_short[correct_index]}/conditioned_{unique_prompts_short[prompt_idx]}"
+                        heatmap_dir_path_raw = f"heatmaps/rgb_raw/correct_{unique_prompts_short[correct_index]}/conditioned_{unique_prompts_short[prompt_idx]}"
+                        heatmap_dir_path_matlab = f"heatmaps/matlab/correct_{unique_prompts_short[correct_index]}/conditioned_{unique_prompts_short[prompt_idx]}"
+                        heatmap_dir_path_matlab_raw = f"heatmaps/matlab_raw/correct_{unique_prompts_short[correct_index]}/conditioned_{unique_prompts_short[prompt_idx]}"
                         os.makedirs(heatmap_dir_path, exist_ok=True)
                         os.makedirs(heatmap_dir_path_raw, exist_ok=True)
                         os.makedirs(heatmap_dir_path_matlab, exist_ok=True)
                         os.makedirs(heatmap_dir_path_matlab_raw, exist_ok=True)
 
                         if prompt_idx == 0:
-                            original_file_path = os.path.join(original_dir_path, f'{image_round}.png')
+                            original_file_path = os.path.join(original_dir_path, f"{image_round}.png")
                             input_image_np = np.array(input_image)  # Convert tensor to numpy if not already
                             Image.fromarray(input_image_np).save(original_file_path)
                             print(f"Original image saved to {original_file_path}")
 
-                        heatmap_rgb_path = os.path.join(heatmap_dir_path, f'{image_round}.png')
+                        heatmap_rgb_path = os.path.join(heatmap_dir_path, f"{image_round}.png")
                         plt.imsave(heatmap_rgb_path, viridis_image, cmap=custom_cmap)
-                        heatmap_rgb_path_raw = os.path.join(heatmap_dir_path_raw, f'{image_round}.png')
+                        heatmap_rgb_path_raw = os.path.join(heatmap_dir_path_raw, f"{image_round}.png")
                         Image.fromarray(image_np).save(heatmap_rgb_path_raw)
                         print(f"Heatmap RGB image saved to {heatmap_rgb_path}")
 
                         # Change from 0-1 to 0-255
-                        gray_image_normalized_255 = (gray_image_normalized * 255).astype(np.uint8)
-                        heatmap_mat_path = os.path.join(heatmap_dir_path_matlab, f'{image_round}.mat')
-                        savemat(heatmap_mat_path, {'heatmap': gray_image_normalized_255})
-                        heatmap_mat_path_raw = os.path.join(heatmap_dir_path_matlab_raw, f'{image_round}.mat')
-                        savemat(heatmap_mat_path_raw, {'heatmap': image_np})
-                        print(f"Heatmap MATLAB file saved to {heatmap_mat_path}")
+                        # gray_image_normalized_255 = (gray_image_normalized * 255).astype(np.uint8)
+                        # heatmap_mat_path = os.path.join(heatmap_dir_path_matlab, f"{image_round}.mat")
+                        # savemat(heatmap_mat_path, {"heatmap": gray_image_normalized_255})
+                        # heatmap_mat_path_raw = os.path.join(heatmap_dir_path_matlab_raw, f"{image_round}.mat")
+                        # savemat(heatmap_mat_path_raw, {"heatmap": image_np})
+                        # print(f"Heatmap MATLAB file saved to {heatmap_mat_path}")
 
-                fig.suptitle(f'Heatmap analysis, true class: "{unique_prompts_short[correct_index]}", predicted class "{unique_prompts_short[most_probable_class_idx]}"', fontsize=fontsize * 2)
+                # fig.suptitle(
+                #     f'Heatmap analysis, true class: "{unique_prompts_short[correct_index]}", predicted class "{unique_prompts_short[most_probable_class_idx]}"',
+                #     fontsize=fontsize * 2,
+                # )
 
-                # Save to wandb
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png')
-                buf.seek(0)
-                heatmap_image = Image.open(buf)
-                all_heatmaps_images.append(heatmap_image)
+                # # Save to wandb
+                # buf = io.BytesIO()
+                # plt.savefig(buf, format="png")
+                # buf.seek(0)
+                # heatmap_image = Image.open(buf)
+                # all_heatmaps_images.append(heatmap_image)
 
             predicted_class = most_probable_class_idx
             if predicted_class == correct_index:
@@ -765,11 +842,22 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                 if j != correct_index and j != predicted_class:
                     TN[j] += 1
 
+            zeta_anomaly = 0
+            k = len(mse_latent_normalized[-1, :]) - 1
+            k = min(k, 10)
+            sorted_errors = np.sort(mse_latent_normalized[-1, :])
+            for j in range(k):
+                if j == 0:
+                    continue
+                zeta_anomaly += np.abs((sorted_errors[j] - sorted_errors[0]) / k)
+                for l in range(k):
+                    if l == 0:
+                        continue
+                    zeta_anomaly -= np.abs((sorted_errors[l] - sorted_errors[j]) / (k * (k - 1)))
 
-            if not args.use_snr_weighting:
-                mse_latent_normalized
+            current_delta_correct = zeta_anomaly
+            # current_delta_correct = mse_latent_normalized[-1, next_most_probable_class_idx] - mse_latent_normalized[-1, predicted_class]
 
-            current_delta_correct = mse_latent_normalized[-1, next_most_probable_class_idx] - mse_latent_normalized[-1, predicted_class]
             delta_correct.append((current_delta_correct, delta_correct_nr))
 
             conf_matrix[correct_index, predicted_class] += 1
@@ -810,54 +898,86 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
             else:
                 avg_curve_wrong.append(sorted_mse_latent_normalized[-1, :])
 
-
-            cmap = plt.get_cmap('viridis')
+            cmap = plt.get_cmap("viridis")
             # Normalize the all_t values to the range [0, 1]
             norm = mcolors.Normalize(vmin=np.min(all_t), vmax=np.max(all_t))
 
-            for i in range(len(sorted_mse_latent_normalized[:-1,0])):
+            for i in range(len(sorted_mse_latent_normalized[:-1, 0])):
                 color = cmap(norm(all_t[i]))
-                ax1.plot(sorted_mse_latent_normalized[i,:], label='_nolegend_', marker='o', color=color, linewidth=1, linestyle='-', markersize=1, alpha=1)
+                ax1.plot(
+                    sorted_mse_latent_normalized[i, :],
+                    label="_nolegend_",
+                    marker="o",
+                    color=color,
+                    linewidth=1,
+                    linestyle="-",
+                    markersize=1,
+                    alpha=1,
+                )
 
             # Add a colorbar
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             sm.set_array([])
             cbar = fig.colorbar(sm, ax=ax1)
-            cbar.set_label('all_t values')
+            cbar.set_label("all_t values")
 
-            ax1.plot(sorted_mse_latent_normalized[-1, :], label='Mean MSE', marker='o', linestyle='-', linewidth=3, color='black')
-            highlight_style = dict(marker='*', markersize=15, markeredgecolor='black', markerfacecolor='yellow', zorder=5)
+            ax1.plot(
+                sorted_mse_latent_normalized[-1, :],
+                label="Mean MSE",
+                marker="o",
+                linestyle="-",
+                linewidth=3,
+                color="black",
+            )
+            highlight_style = dict(
+                marker="*",
+                markersize=15,
+                markeredgecolor="black",
+                markerfacecolor="yellow",
+                zorder=5,
+            )
 
-            ax1.plot(index_map[correct_index], correct_value_latent, **highlight_style, label='Correct Value')
+            ax1.plot(
+                index_map[correct_index],
+                correct_value_latent,
+                **highlight_style,
+                label="Correct Value",
+            )
             # highlight the predicted class
-            ax1.axhline(y=predicted_value_latent, color='red', linestyle='-', linewidth=2)
-            highlight_style = dict(marker='*', markersize=10, markeredgecolor='blue', markerfacecolor='green', zorder=5)
-            ax1.plot(0, predicted_value_latent, **highlight_style, label='Predicted Value')
+            ax1.axhline(y=predicted_value_latent, color="red", linestyle="-", linewidth=2)
+            highlight_style = dict(
+                marker="*",
+                markersize=10,
+                markeredgecolor="blue",
+                markerfacecolor="green",
+                zorder=5,
+            )
+            ax1.plot(0, predicted_value_latent, **highlight_style, label="Predicted Value")
 
             x_labels = [unique_prompts_short[i] for i in sorted_indices]
             ax1.set_xticks(range(len(x_labels)))
-            ax1.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=20)
+            ax1.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=20)
 
-            ax1.set_ylabel('Normalised error', fontsize=20)
+            ax1.set_ylabel("Normalised error", fontsize=20)
             ax1.legend()
-            ax1.set_title('MSE Latent Loss')
+            ax1.set_title("MSE Latent Loss")
 
             ax2.imshow(input_image)
-            ax2.axis('off')
-            ax2.set_title(f'{unique_prompts_short[correct_index]}', fontsize=20)
+            ax2.axis("off")
+            ax2.set_title(f"{unique_prompts_short[correct_index]}", fontsize=20)
 
             plt.subplots_adjust(hspace=0.3)
             plt.tight_layout()
 
             buf = io.BytesIO()
-            plt.savefig(buf, format='png')
+            plt.savefig(buf, format="png")
             plt.close()
             buf.seek(0)
 
             # Open the image directly from the BytesIO object
             classification_image = Image.open(buf)
             all_classification_images.append(classification_image)
-            correct_tracker.append(correct_index==predicted_class)
+            correct_tracker.append(correct_index == predicted_class)
 
             total_counts[correct_index] += 1
 
@@ -872,10 +992,11 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                 print(f"Saved wrong image to {save_path}/{image_name_tmp}.png")
 
             if total_counts[correct_index] > 0:
-                print(f"Class {unique_prompts_short[correct_index]}: Correct {correct_counts[correct_index]}/{total_counts[correct_index]}")
+                print(
+                    f"Class {unique_prompts_short[correct_index]}: Correct {correct_counts[correct_index]}/{total_counts[correct_index]}"
+                )
                 print(f"Correct {np.sum(correct_counts)}/{np.sum(total_counts)}")
                 print(f"Total: Correct % {(100 * np.sum(correct_counts)/np.sum(total_counts)):.2f}")
-
 
     ####################################   Plot and log to wandb below   ########################################
     # Initialize dictionaries for storing curves and logging
@@ -893,13 +1014,15 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
         df.to_csv(csv_path, index=False)
 
         # Create an artifact with the unique filename
-        artifact = wandb.Artifact(f"{name}_{unique_id}", type='dataset')
+        artifact = wandb.Artifact(f"{name}_{unique_id}", type="dataset")
         artifact.add_file(csv_path)
         wandb.log_artifact(artifact)
         os.remove(csv_path)
+
     # Log arrays as artifacts with unique filenames
     log_array_as_artifact(all_preds, "all_preds")
     log_array_as_artifact(all_next_most_probable, "all_next_most_probable")
+    print(f"all_labels: {all_labels}")
     log_array_as_artifact(all_labels, "all_labels")
     log_array_as_artifact(all_errors, "all_errors")
     log_array_as_artifact(all_paths, "all_paths")
@@ -914,11 +1037,11 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
         # Save to JSON with unique filename
         json_path = f"{name}_{unique_id}.json"
-        with open(json_path, 'w') as f:
+        with open(json_path, "w") as f:
             json.dump(matrix_list, f)
 
         # Create an artifact with the unique filename
-        artifact = wandb.Artifact(f"{name}_{unique_id}", type='dataset')
+        artifact = wandb.Artifact(f"{name}_{unique_id}", type="dataset")
         artifact.add_file(json_path)
         wandb.log_artifact(artifact)
         os.remove(json_path)
@@ -941,26 +1064,36 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
         # Plotting
         plt.figure(figsize=(10, 6))
-        plt.scatter(deltas, correct, color='blue', label='Data Points', alpha=0.08)
-        plt.plot(x_test, probabilities, color='red', label='Logistic Regression Fit')
+        plt.scatter(deltas, correct, color="blue", label="Data Points", alpha=0.08)
+        plt.plot(x_test, probabilities, color="red", label="Logistic Regression Fit")
 
         # Horizontal line at y=
         confidence_level = 0.9
-        plt.axhline(y=confidence_level, color='green', linestyle='--', label=f'Confidence Level {confidence_level}')
+        plt.axhline(
+            y=confidence_level,
+            color="green",
+            linestyle="--",
+            label=f"Confidence Level {confidence_level}",
+        )
 
         # Find intersection
         # Note: The intersection finds where the curve reaches confidence_level probability.
         intersection = x_test[np.abs(probabilities - confidence_level).argmin()]
-        plt.axvline(x=intersection, color='purple', linestyle='--', label='Intersection at x={:.2f}'.format(intersection[0]))
+        plt.axvline(
+            x=intersection,
+            color="purple",
+            linestyle="--",
+            label="Intersection at x={:.2f}".format(intersection[0]),
+        )
 
-        plt.title('Logistic Regression Fit to Data')
-        plt.xlabel('Normalised error difference between predicted and next most probable class')
-        plt.ylabel('Correctly classified')
-        plt.legend(loc='best', fancybox=True, framealpha=0.5)
+        plt.title("Logistic Regression Fit to Data")
+        plt.xlabel("Confidence")
+        plt.ylabel("Correctly classified")
+        plt.legend(loc="best", fancybox=True, framealpha=0.5)
         plt.grid(True)
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png')
+        plt.savefig(buf, format="png")
         buf.seek(0)  # Ensure the buffer's read pointer is at the start
         image = np.array(Image.open(buf))
         logs["Logistic Regression"] = wandb.Image(image)
@@ -981,13 +1114,13 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
         # Plotting
         plt.figure(figsize=(10, 6))
-        plt.plot(x, pdf_correct, color='blue', label='Correct Classification')
-        plt.plot(x, pdf_incorrect, color='red', label='Incorrect Classification')
-        plt.fill_between(x, pdf_correct, color='blue', alpha=0.3)
-        plt.fill_between(x, pdf_incorrect, color='red', alpha=0.3)
-        plt.title('Gaussian Fits for Classification Correctness')
-        plt.xlabel('Differance between prediction and next value')
-        plt.ylabel('Probability Density')
+        plt.plot(x, pdf_correct, color="blue", label="Correct Classification")
+        plt.plot(x, pdf_incorrect, color="red", label="Incorrect Classification")
+        plt.fill_between(x, pdf_correct, color="blue", alpha=0.3)
+        plt.fill_between(x, pdf_incorrect, color="red", alpha=0.3)
+        plt.title("Gaussian Fits for Classification Correctness")
+        plt.xlabel("Confidence")
+        plt.ylabel("Probability Density")
         plt.legend()
         plt.grid(True)
 
@@ -1007,22 +1140,22 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
             auc = roc_auc_score(labels, scores)
 
             plt.figure(figsize=(10, 6))
-            plt.plot(x, pdf_kde_correct, color='blue', label='Correct Classification')
-            plt.plot(x, pdf_kde_incorrect, color='red', label='Incorrect Classification')
-            plt.fill_between(x, pdf_kde_correct, color='blue', alpha=0.3)
-            plt.fill_between(x, pdf_kde_incorrect, color='red', alpha=0.3)
-            plt.title('Kernel Density Estimate for Classification Correctness')
-            plt.xlabel('Increasing certainty')
-            plt.ylabel('Probability Density')
+            plt.plot(x, pdf_kde_correct, color="blue", label="Correct Classification")
+            plt.plot(x, pdf_kde_incorrect, color="red", label="Incorrect Classification")
+            plt.fill_between(x, pdf_kde_correct, color="blue", alpha=0.3)
+            plt.fill_between(x, pdf_kde_incorrect, color="red", alpha=0.3)
+            plt.title("Kernel Density Estimate for Classification Correctness")
+            plt.xlabel("Increasing certainty")
+            plt.ylabel("Probability Density")
             plt.grid(True)
 
             # Add Wasserstein distance to the legend
-            plt.plot([], [], ' ', label=f'AUC: {auc:.4f}')
+            plt.plot([], [], " ", label=f"AUC: {auc:.4f}")
             plt.legend()
 
             # Save plot to buffer and then to wandb
             buf = io.BytesIO()
-            plt.savefig(buf, format='png')
+            plt.savefig(buf, format="png")
             buf.seek(0)
             image = np.array(Image.open(buf))
             plt.close()
@@ -1047,28 +1180,27 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
             auc = roc_auc_score(labels, scores)
 
             plt.figure(figsize=(10, 6))
-            plt.plot(x, pdf_kde_correct_area, color='blue', label='Correct Classification')
-            plt.plot(x, pdf_kde_incorrect_area, color='red', label='Incorrect Classification')
-            plt.fill_between(x, pdf_kde_correct_area, color='blue', alpha=0.3)
-            plt.fill_between(x, pdf_kde_incorrect_area, color='red', alpha=0.3)
-            plt.title('Kernel Density Estimate for Classification Correctness based on Area')
-            plt.xlabel('Increasing certainty')
-            plt.ylabel('Probability Density')
+            plt.plot(x, pdf_kde_correct_area, color="blue", label="Correct Classification")
+            plt.plot(x, pdf_kde_incorrect_area, color="red", label="Incorrect Classification")
+            plt.fill_between(x, pdf_kde_correct_area, color="blue", alpha=0.3)
+            plt.fill_between(x, pdf_kde_incorrect_area, color="red", alpha=0.3)
+            plt.title("Kernel Density Estimate for Classification Correctness based on Area")
+            plt.xlabel("Increasing certainty")
+            plt.ylabel("Probability Density")
             plt.grid(True)
 
             # Add Wasserstein distance to the legend
-            plt.plot([], [], ' ', label=f'AUC: {auc:.4f}')
+            plt.plot([], [], " ", label=f"AUC: {auc:.4f}")
             plt.legend()
 
             # Save plot to buffer and then to wandb
             buf = io.BytesIO()
-            plt.savefig(buf, format='png')
+            plt.savefig(buf, format="png")
             buf.seek(0)
             image = np.array(Image.open(buf))
             plt.close()
 
             logs["KDE Area Plot"] = wandb.Image(image)
-
 
     # Definitions for plot categories
     titles = ["Correct", "Wrong"]
@@ -1083,9 +1215,9 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
             avg_curves[title] = avg_curve
             std_curves[title] = std_curve
 
-    def plot_curves(curve_titles, fig_title, colors=['blue', 'red']):
+    def plot_curves(curve_titles, fig_title, colors=["blue", "red"]):
         fig, ax = plt.subplots(figsize=(10, 6))
-        line_styles = ['-', '--']
+        line_styles = ["-", "--"]
         legend_handles = []
 
         for title, color, style in zip(curve_titles, colors, line_styles):
@@ -1093,59 +1225,73 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
                 avg_curve = avg_curves[title]
                 std_curve = std_curves[title]
                 x = np.arange(len(avg_curve))
-                line, = ax.plot(x, avg_curve, label=title, linestyle=style, color=color, linewidth=2)
-                ax.fill_between(x, avg_curve - std_curve, avg_curve + std_curve, color=color, alpha=0.2)
+                (line,) = ax.plot(x, avg_curve, label=title, linestyle=style, color=color, linewidth=2)
+                ax.fill_between(
+                    x,
+                    avg_curve - std_curve,
+                    avg_curve + std_curve,
+                    color=color,
+                    alpha=0.2,
+                )
                 legend_handles.append(line)
 
         # Add a legend handle for the shaded area representing ±1 SD
-        sd_patch = Patch(color='gray', alpha=0.2, label='±1 SD')
+        sd_patch = Patch(color="gray", alpha=0.2, label="±1 SD")
         legend_handles.append(sd_patch)
 
         # ax.set_ylim(-1.5, 1.5)
-        ax.set_xlabel('Classes sorted by error', fontsize=12)
-        ax.set_ylabel('Normalised error', fontsize=12)
+        ax.set_xlabel("Classes sorted by error", fontsize=12)
+        ax.set_ylabel("Normalised error", fontsize=12)
         ax.set_title(fig_title, fontsize=14)
-        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax.grid(True, which="both", linestyle="--", linewidth=0.5)
 
         if legend_handles:
-            ax.legend(handles=legend_handles, loc='upper left', fontsize=10)
+            ax.legend(handles=legend_handles, loc="upper left", fontsize=10)
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png')
+        plt.savefig(buf, format="png")
         buf.seek(0)
         image = np.array(Image.open(buf))
         return image
 
-    def plot_curves_diff(curve_titles, fig_title, colors=['blue', 'red']):
+    def plot_curves_diff(curve_titles, fig_title, colors=["blue", "red"]):
         fig, ax = plt.subplots(figsize=(10, 6))
-        line_styles = ['-', '--']
+        line_styles = ["-", "--"]
         legend_handles = []
 
         for title, color, style in zip(curve_titles, colors, line_styles):
             if title in avg_curves:
                 avg_curve = np.diff(avg_curves[title])  # Calculate difference between consecutive points
-                var_curve = std_curves[title][:-1]**2 + std_curves[title][1:]**2  # Sum of variances of consecutive points
+                var_curve = (
+                    std_curves[title][:-1] ** 2 + std_curves[title][1:] ** 2
+                )  # Sum of variances of consecutive points
                 std_curve = np.sqrt(var_curve)  # Standard deviation of the difference
                 x = np.arange(len(avg_curve))  # Adjust x to match the new length of avg_curve
-                line, = ax.plot(x, avg_curve, label=title, linestyle=style, color=color, linewidth=2)
-                ax.fill_between(x, avg_curve - std_curve, avg_curve + std_curve, color=color, alpha=0.2)
+                (line,) = ax.plot(x, avg_curve, label=title, linestyle=style, color=color, linewidth=2)
+                ax.fill_between(
+                    x,
+                    avg_curve - std_curve,
+                    avg_curve + std_curve,
+                    color=color,
+                    alpha=0.2,
+                )
                 legend_handles.append(line)
 
         # Add a legend handle for the shaded area representing ±1 SD
-        sd_patch = Patch(color='gray', alpha=0.2, label='±1 SD')
+        sd_patch = Patch(color="gray", alpha=0.2, label="±1 SD")
         legend_handles.append(sd_patch)
 
         ax.set_ylim(auto=True)  # Automatically adjust based on data range
-        ax.set_xlabel('Classes sorted by error', fontsize=12)
-        ax.set_ylabel('Difference in Normalised error', fontsize=12)
+        ax.set_xlabel("Classes sorted by error", fontsize=12)
+        ax.set_ylabel("Difference in Normalised error", fontsize=12)
         ax.set_title(fig_title, fontsize=14)
-        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax.grid(True, which="both", linestyle="--", linewidth=0.5)
 
         if legend_handles:
-            ax.legend(handles=legend_handles, loc='upper left', fontsize=10)
+            ax.legend(handles=legend_handles, loc="upper left", fontsize=10)
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png')
+        plt.savefig(buf, format="png")
         buf.seek(0)
         image = np.array(Image.open(buf))
         return image
@@ -1187,7 +1333,6 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
     precision = np.zeros(n_classes)
     sensitivity = np.zeros(n_classes)
-    accuracy = np.zeros(n_classes)
     f1_score = np.zeros(n_classes)
 
     for class_index in range(n_classes):
@@ -1202,7 +1347,11 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
         # Calculate F1-score using the precision and sensitivity
         if precision[class_index] + sensitivity[class_index] > 0:
-            f1_score[class_index] = 2 * (precision[class_index] * sensitivity[class_index]) / (precision[class_index] + sensitivity[class_index])
+            f1_score[class_index] = (
+                2
+                * (precision[class_index] * sensitivity[class_index])
+                / (precision[class_index] + sensitivity[class_index])
+            )
         else:
             f1_score[class_index] = 0
 
@@ -1217,28 +1366,28 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
     # Plot the precision and sensitivity by class
     fig, ax = plt.subplots(figsize=(10, 6))
-    classes = [f'{unique_prompts_short[i]} ({images_in_test_set[i]})' for i in range(n_classes)]
+    classes = [f"{unique_prompts_short[i]} ({images_in_test_set[i]})" for i in range(n_classes)]
     x = np.arange(len(classes))
     width = 0.35
 
-    rects1 = ax.bar(x - width/2, precision, width, label='Precision')
-    rects2 = ax.bar(x + width/2, sensitivity, width, label='Sensitivity (Recall)')
+    rects1 = ax.bar(x - width / 2, precision, width, label="Precision")
+    rects2 = ax.bar(x + width / 2, sensitivity, width, label="Sensitivity (Recall)")
 
-    ax.set_ylabel('Scores')
-    ax.set_title('Precision and Sensitivity by Class')
+    ax.set_ylabel("Scores")
+    ax.set_title("Precision and Sensitivity by Class")
     ax.set_xticks(x)
-    ax.set_xticklabels(classes, rotation=45, ha='right')
+    ax.set_xticklabels(classes, rotation=45, ha="right")
 
     # Place the legend outside the plot area
-    ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
+    ax.legend(loc="upper left", bbox_to_anchor=(1, 1))
 
-    ax.bar_label(rects1, padding=3, fmt='%.2f')
-    ax.bar_label(rects2, padding=3, fmt='%.2f')
+    ax.bar_label(rects1, padding=3, fmt="%.2f")
+    ax.bar_label(rects2, padding=3, fmt="%.2f")
 
     plt.tight_layout()
     fig.subplots_adjust(right=0.75)
     buf = io.BytesIO()
-    plt.savefig(buf, format='png')
+    plt.savefig(buf, format="png")
     buf.seek(0)
 
     # Update logs with class_accuracy_logs without overwriting existing keys
@@ -1252,33 +1401,40 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
     logs["Precision and Sensitivity Plot"] = wandb.Image(image, caption="Precision and Sensitivity by Class")
 
     fig, ax = plt.subplots(figsize=(12, 12))  # Adjust the figure size as needed
-    im = ax.imshow(conf_matrix, interpolation='nearest', cmap=plt.cm.Blues)
+    im = ax.imshow(conf_matrix, interpolation="nearest", cmap=plt.cm.Blues)
     cbar = ax.figure.colorbar(im, ax=ax)
-    cbar.set_label('Scale')  # Optional: Add label to the color bar
+    cbar.set_label("Scale")  # Optional: Add label to the color bar
 
     # Set ticks and labels with adjustments for visibility
-    ax.set(xticks=np.arange(conf_matrix.shape[1]),
+    ax.set(
+        xticks=np.arange(conf_matrix.shape[1]),
         yticks=np.arange(conf_matrix.shape[0]),
         xticklabels=unique_prompts_short,
         yticklabels=unique_prompts_short,
-        title='Confusion Matrix',
-        ylabel='True Label',
-        xlabel='Predicted Label')
+        title="Confusion Matrix",
+        ylabel="True Label",
+        xlabel="Predicted Label",
+    )
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
     plt.subplots_adjust(bottom=0.2, top=0.95, left=0.15, right=0.95)  # Tweak these values as necessary
 
     # Loop over data dimensions and create text annotations.
-    thresh = conf_matrix.max() / 2.
+    thresh = conf_matrix.max() / 2.0
     for i in range(conf_matrix.shape[0]):
         for j in range(conf_matrix.shape[1]):
-            ax.text(j, i, format(int(conf_matrix[i, j]), 'd'),
-                    ha="center", va="center",
-                    color="white" if conf_matrix[i, j] > thresh else "black")
+            ax.text(
+                j,
+                i,
+                format(int(conf_matrix[i, j]), "d"),
+                ha="center",
+                va="center",
+                color="white" if conf_matrix[i, j] > thresh else "black",
+            )
 
     # Save to BytesIO object for logging
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
+    plt.savefig(buf, format="png", bbox_inches="tight")
     buf.seek(0)
     image = np.array(Image.open(buf))
     logs["Confusion Matrix"] = wandb.Image(image)
@@ -1295,8 +1451,7 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
     plt.close()
 
     def create_loss_dataframe(loss_array, all_t, all_labels):
-
-        loss_array = loss_array[:,:min_noise_trials,:]
+        loss_array = loss_array[:, :min_noise_trials, :]
         all_t = all_t[:min_noise_trials]
 
         # Create a list to store all rows
@@ -1304,72 +1459,75 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
 
         # Iterate through each image, timestep, and class
         for image_idx in range(loss_array.shape[0]):
+            print(f"shape of loss array: {loss_array.shape}")
             image_class = all_labels[image_idx]
             for timestep_idx in range(loss_array.shape[1]):
                 for class_idx in range(loss_array.shape[2]):
-                    rows.append({
-                        'image_id': image_idx,
-                        'image_class': image_class,
-                        'timestep': 1000 - all_t[timestep_idx],
-                        'test_class': all_labels[class_idx],
-                        'loss': loss_array[image_idx, timestep_idx, class_idx]
-                    })
+                    rows.append(
+                        {
+                            "image_id": image_idx,
+                            "image_class": image_class,
+                            "timestep": 1000 - all_t[timestep_idx],
+                            # "test_class": all_labels[class_idx],
+                            "loss": loss_array[image_idx, timestep_idx, class_idx],
+                        }
+                    )
 
         # Create the DataFrame
         df = pd.DataFrame(rows)
 
         # Convert 'image_id' and 'timestep' to integers
-        df['image_id'] = df['image_id'].astype(int)
-        df['timestep'] = df['timestep'].astype(int)
-        df['time'] = df['timestep'] / num_inference_steps_classification
-        df['std'] = df.groupby(['image_id', 'timestep'])['loss'].transform('std')
+        df["image_id"] = df["image_id"].astype(int)
+        df["timestep"] = df["timestep"].astype(int)
+        df["time"] = df["timestep"] / num_inference_steps_classification
+        df["std"] = df.groupby(["image_id", "timestep"])["loss"].transform("std")
 
         return df
 
     # Create the DataFrame
     df = create_loss_dataframe(all_loss_saver_array, all_t, all_labels)
 
-    median_std = df.groupby('time')['std'].median().reset_index()
+    median_std = df.groupby("time")["std"].median().reset_index()
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-    sns.boxplot(data=df, x='time', y='std', ax=ax1)
-    ax1.set_title('Distribution of std across time (Box Plot)')
-    ax1.set_xlabel('Time')
-    ax1.set_ylabel('Standard Deviation')
+    sns.boxplot(data=df, x="time", y="std", ax=ax1)
+    ax1.set_title("Distribution of std across time (Box Plot)")
+    ax1.set_xlabel("Time")
+    ax1.set_ylabel("Standard Deviation")
 
     # median plot with polynomial fits
-    ax2.scatter(median_std['time'], median_std['std'], color='blue', label='median std')
+    ax2.scatter(median_std["time"], median_std["std"], color="blue", label="median std")
 
     # Try polynomial fits of different degrees
     degrees = [4]
-    colors = ['red', 'green', 'purple']
+    colors = ["red", "green", "purple"]
 
     for degree, color in zip(degrees, colors):
         # Fit polynomial
-        coeffs = np.polyfit(median_std['time'], median_std['std'], degree)
+        coeffs = np.polyfit(median_std["time"], median_std["std"], degree)
         poly = np.poly1d(coeffs)
 
         # Plot fitted polynomial
-        x_fit = np.linspace(median_std['time'].min(), median_std['time'].max(), 100)
+        x_fit = np.linspace(median_std["time"].min(), median_std["time"].max(), 100)
         y_fit = poly(x_fit)
-        ax2.plot(x_fit, y_fit, color=color, label=f'Degree {degree} fit')
+        ax2.plot(x_fit, y_fit, color=color, label=f"Degree {degree} fit")
 
         # Print polynomial coefficients in the required format
         print(f"\nDegree {degree} polynomial coefficients:")
         print(f"[a0, a1, ..., a{degree}] = {list(coeffs[::-1])}")
         logs[f"poly coeffs deg {degree}"] = list(coeffs[::-1])
 
-    ax2.set_title('median std across time with Polynomial Fits')
-    ax2.set_xlabel('Time')
-    ax2.set_ylabel('median Standard Deviation')
+    ax2.set_title("median std across time with Polynomial Fits")
+    ax2.set_xlabel("Time")
+    ax2.set_ylabel("median Standard Deviation")
     ax2.legend()
 
     # Adjust the layout and display the plot
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
+    plt.savefig(buf, format="png", bbox_inches="tight")
     buf.seek(0)
     image = np.array(Image.open(buf))
     logs["poly fit to std"] = wandb.Image(image)
@@ -1377,7 +1535,10 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
     for tracker in accelerator.trackers:
         if tracker.name == "wandb":
             if args.validation_prompts:
-                logs["images"] = [wandb.Image(image, caption=f"{i}: {args.validation_prompts[i]}") for i, image in enumerate(images_val_prompts)]
+                logs["images"] = [
+                    wandb.Image(image, caption=f"{i}: {args.validation_prompts[i]}")
+                    for i, image in enumerate(images_val_prompts)
+                ]
 
             # Randomly shuffle indices for unpredicted and predicted correctly images
             wrong_indices = [i for i, correct in enumerate(correct_tracker) if not correct]
@@ -1396,7 +1557,10 @@ def log_validation(vae_orig, unet_orig, args, accelerator, weight_dtype, epoch, 
             logs["correct_classification_images"] = [
                 wandb.Image(all_classification_images[i], caption=f"{i}") for i in selected_correct_indices
             ]
-            logs["heatmap_images"] = [wandb.Image(image, caption=f"{i}: {unique_prompts_short[(i % n_classes)]}") for i, image in enumerate(all_heatmaps_images)]
+            logs["heatmap_images"] = [
+                wandb.Image(image, caption=f"{i}: {unique_prompts_short[(i % n_classes)]}")
+                for i, image in enumerate(all_heatmaps_images)
+            ]
 
             tracker.log(logs)
 
@@ -1409,7 +1573,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
 
     parser.add_argument(
-        "--input_perturbation", type=float, default=0, help="The scale of input perturbation. Recommended 0.1."
+        "--input_perturbation",
+        type=float,
+        default=0,
+        help="The scale of input perturbation. Recommended 0.1.",
     )
     parser.add_argument(
         "--pretrained_model_name_or_path",
@@ -1458,7 +1625,10 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--image_column", type=str, default="image", help="The column of the dataset containing an image."
+        "--image_column",
+        type=str,
+        default="image",
+        help="The column of the dataset containing an image.",
     )
     parser.add_argument(
         "--caption_column",
@@ -1492,7 +1662,9 @@ def parse_args():
         type=str_to_float_list,
         default=None,
         nargs="+",
-        help=("A set of float number arrays evaluated every `--validation_epochs` and logged to `--report_to`. Each array should be enclosed in quotes."),
+        help=(
+            "A set of float number arrays evaluated every `--validation_epochs` and logged to `--report_to`. Each array should be enclosed in quotes."
+        ),
     )
     parser.add_argument(
         "--unique_prompts_to_add",
@@ -1536,17 +1708,13 @@ def parse_args():
         "--w_weight_json_path",
         type=str,
         default=None,
-        help=(
-            "A folder containing validation json for the w_weight to calculate logistic regression."
-        ),
+        help=("A folder containing validation json for the w_weight to calculate logistic regression."),
     )
     parser.add_argument(
         "--validation_prompt_dir",
         type=str,
         default=None,
-        help=(
-            "A folder containing validation prompts in json files, needs the same name as the image file."
-        ),
+        help=("A folder containing validation prompts in json files, needs the same name as the image file."),
     )
 
     parser.add_argument(
@@ -1581,9 +1749,7 @@ def parse_args():
         "--radius",
         type=int,
         default=20,
-        help=(
-            "The radius for evaluation"
-        ),
+        help=("The radius for evaluation"),
     )
     parser.add_argument(
         "--center_crop",
@@ -1613,19 +1779,30 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--color_jitter", action="store_true", help="whether to apply random brightness and contrast adjustments"
+        "--color_jitter",
+        action="store_true",
+        help="whether to apply random brightness and contrast adjustments",
     )
 
     parser.add_argument(
-        "--jitter_strength", type=float,  default=0.0, help="jitter strength (half for hue)"
+        "--jitter_strength",
+        type=float,
+        default=0.0,
+        help="jitter strength (half for hue)",
     )
 
     parser.add_argument(
-        "--random_gray_probability", type=float,  default=0.0, help="probability of turning the image to gray scale"
+        "--random_gray_probability",
+        type=float,
+        default=0.0,
+        help="probability of turning the image to gray scale",
     )
 
     parser.add_argument(
-        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size",
+        type=int,
+        default=16,
+        help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
@@ -1694,7 +1871,10 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps",
+        type=int,
+        default=500,
+        help="Number of steps for the warmup in the lr scheduler.",
     )
     parser.add_argument(
         "--snr_gamma",
@@ -1707,10 +1887,12 @@ def parse_args():
         "--mixup_alpha",
         type=float,
         default=0.3,
-        help="Mixup alpha to be used if mixup is enabled. "
+        help="Mixup alpha to be used if mixup is enabled. ",
     )
     parser.add_argument(
-        "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
+        "--use_8bit_adam",
+        action="store_true",
+        help="Whether or not to use 8-bit Adam from bitsandbytes.",
     )
     parser.add_argument(
         "--allow_tf32",
@@ -1732,6 +1914,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--category_to_number",
+        type=str,
+        default=None,
+        required=False,
+        help=(
+            "A path to a json file that maps the category names to numbers. The keys are the category names and the corresponding values are the category numbers."
+        ),
+    )
+    parser.add_argument(
         "--dataloader_num_workers",
         type=int,
         default=0,
@@ -1739,13 +1930,37 @@ def parse_args():
             "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
         ),
     )
-    parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
+    parser.add_argument(
+        "--adam_beta1",
+        type=float,
+        default=0.9,
+        help="The beta1 parameter for the Adam optimizer.",
+    )
+    parser.add_argument(
+        "--adam_beta2",
+        type=float,
+        default=0.999,
+        help="The beta2 parameter for the Adam optimizer.",
+    )
     parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
-    parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
+    parser.add_argument(
+        "--adam_epsilon",
+        type=float,
+        default=1e-08,
+        help="Epsilon value for the Adam optimizer",
+    )
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
-    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
+    parser.add_argument(
+        "--push_to_hub",
+        action="store_true",
+        help="Whether or not to push the model to the Hub.",
+    )
+    parser.add_argument(
+        "--hub_token",
+        type=str,
+        default=None,
+        help="The token to use to push to the Model Hub.",
+    )
     parser.add_argument(
         "--prediction_type",
         type=str,
@@ -1787,7 +2002,12 @@ def parse_args():
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
         ),
     )
-    parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+    parser.add_argument(
+        "--local_rank",
+        type=int,
+        default=-1,
+        help="For distributed training: local_rank",
+    )
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
@@ -1813,10 +2033,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
+        "--enable_xformers_memory_efficient_attention",
+        action="store_true",
+        help="Whether or not to use xformers.",
     )
     parser.add_argument("--noise_offset", type=float, default=0, help="The scale of noise offset.")
-    parser.add_argument("--hist_shift_prob", type=float, default=0.0, help="The probability of the histogram shift.")
+    parser.add_argument(
+        "--hist_shift_prob",
+        type=float,
+        default=0.0,
+        help="The probability of the histogram shift.",
+    )
     parser.add_argument(
         "--validation_epochs",
         type=int,
@@ -1857,7 +2084,9 @@ def parse_args():
         "--shuffle_images",
         type=bool,
         default=False,
-        help=("Whether to shuffle the images during inference (Note, then the same image might be evaluated multiple times)."),
+        help=(
+            "Whether to shuffle the images during inference (Note, then the same image might be evaluated multiple times)."
+        ),
     )
     parser.add_argument(
         "--use_snr_weighting",
@@ -1946,7 +2175,9 @@ def main():
 
         if args.push_to_hub:
             repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
+                repo_id=args.hub_model_id or Path(args.output_dir).name,
+                exist_ok=True,
+                token=args.hub_token,
             ).repo_id
 
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
@@ -1972,11 +2203,16 @@ def main():
     # across multiple gpus and only UNet2DConditionModel will get ZeRO sharded.
     with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
         vae = AutoencoderKL.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
+            args.pretrained_model_name_or_path,
+            subfolder="vae",
+            revision=args.revision,
+            variant=args.variant,
         )
 
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
+        args.pretrained_model_name_or_path,
+        subfolder="unet",
+        revision=args.non_ema_revision,
     )
 
     vae.requires_grad_(False)
@@ -1985,9 +2221,16 @@ def main():
     # Create EMA for the unet.
     if args.use_ema:
         ema_unet = UNet2DConditionModel.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
+            args.pretrained_model_name_or_path,
+            subfolder="unet",
+            revision=args.revision,
+            variant=args.variant,
         )
-        ema_unet = EMAModel(ema_unet.parameters(), model_cls=UNet2DConditionModel, model_config=ema_unet.config)
+        ema_unet = EMAModel(
+            ema_unet.parameters(),
+            model_cls=UNet2DConditionModel,
+            model_config=ema_unet.config,
+        )
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -2146,14 +2389,21 @@ def main():
             return image.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_90)
         return image
 
-
     jitter = args.jitter_strength
     train_transforms = transforms.Compose(
         [
             transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
             transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
+            # transforms.RandomResizedCrop(
+            #     args.resolution,
+            #     scale=(0.25, 1.0),  # You can adjust these values
+            #     ratio=(0.75, 1.3333),  # You can adjust these values
+            #     interpolation=transforms.InterpolationMode.BILINEAR,
+            # ),
             RandHistogramShift(args.hist_shift_prob),
-            transforms.ColorJitter(brightness=jitter, contrast=jitter, saturation=jitter, hue=(jitter/2)) if args.color_jitter else transforms.Lambda(lambda x: x),
+            transforms.ColorJitter(brightness=jitter, contrast=jitter, saturation=jitter, hue=(jitter / 2))
+            if args.color_jitter
+            else transforms.Lambda(lambda x: x),
             transforms.RandomGrayscale(p=args.random_gray_probability),
             transforms.Lambda(lambda x: RandAugment()(x)) if args.random_augment else transforms.Lambda(lambda x: x),
             transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
@@ -2296,10 +2546,10 @@ def main():
     )
 
     def mixup_data(x, y, alpha=1.0):
-        if alpha > 0.:
+        if alpha > 0.0:
             lam = random.betavariate(alpha, alpha)
         else:
-            lam = 1.
+            lam = 1.0
 
         batch_size = x.size()[0]
         index = torch.randperm(batch_size).to(x.device)
@@ -2309,14 +2559,16 @@ def main():
 
         return mixed_x, mixed_y
 
-
     accuracy = 0
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
-
-                mixed_x, mixed_y = mixup_data(batch["pixel_values"].to(weight_dtype), batch["input_ids"].to(weight_dtype), alpha=args.mixup_alpha)
+                mixed_x, mixed_y = mixup_data(
+                    batch["pixel_values"].to(weight_dtype),
+                    batch["input_ids"].to(weight_dtype),
+                    alpha=args.mixup_alpha,
+                )
                 latents = vae.encode(mixed_x).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
 
@@ -2325,13 +2577,19 @@ def main():
                 if args.noise_offset:
                     # https://www.crosslabs.org//blog/diffusion-with-offset-noise
                     noise += args.noise_offset * torch.randn(
-                        (latents.shape[0], latents.shape[1], 1, 1), device=latents.device
+                        (latents.shape[0], latents.shape[1], 1, 1),
+                        device=latents.device,
                     )
                 if args.input_perturbation:
                     new_noise = noise + args.input_perturbation * torch.randn_like(noise)
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = torch.randint(
+                    0,
+                    noise_scheduler.config.num_train_timesteps,
+                    (bsz,),
+                    device=latents.device,
+                )
                 timesteps = timesteps.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
@@ -2363,9 +2621,9 @@ def main():
                     loss = loss.mean(dim=list(range(1, len(loss.shape))))
 
                     def exponential(x):
-                        a=16.30
-                        b=-5.17
-                        c=52
+                        a = 16.30
+                        b = -5.17
+                        c = 52
                         return a * torch.exp(-b * x) + c
 
                     balancing_factor = exponential((1000 - timesteps.float()) / 1000)
@@ -2454,13 +2712,18 @@ def main():
                                         shutil.rmtree(removing_checkpoint)
 
                             str_accuracy = str(round(accuracy, 2))
-                            save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}-{str_accuracy}")
+                            save_path = os.path.join(
+                                args.output_dir,
+                                f"checkpoint-{global_step}-{str_accuracy}",
+                            )
                             accelerator.save_state(save_path)
                             logger.info(f"Saved state to {save_path}")
 
-            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {
+                "step_loss": loss.detach().item(),
+                "lr": lr_scheduler.get_last_lr()[0],
+            }
             progress_bar.set_postfix(**logs)
-
 
             if global_step >= args.max_train_steps:
                 break
@@ -2491,8 +2754,11 @@ def main():
                 ema_unet.copy_to(unet.parameters())
 
             text_encoder = CLIPTextModel.from_pretrained(
-                args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-            ) # We don't use the text encoder in this code, but we want to save via the pipeline, which needs it as an argument.
+                args.pretrained_model_name_or_path,
+                subfolder="text_encoder",
+                revision=args.revision,
+                variant=args.variant,
+            )  # We don't use the text encoder in this code, but we want to save via the pipeline, which needs it as an argument.
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 text_encoder=text_encoder,
@@ -2509,3 +2775,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

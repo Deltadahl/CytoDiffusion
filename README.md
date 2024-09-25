@@ -86,7 +86,8 @@ your_dataset
 ├── eosinophil
 │   ├── image3.png
 │   └── image4.png
-└── ...
+├── ...
+└── name_to_number.json
 ```
 Then, update the paths in the `EXAMPLE.sh` script accordingly.
 
