@@ -166,7 +166,7 @@ If you use this code in your research, please cite our paper:
 ```
 @article{deltadahl2024deep,
   title={Deep Generative Classification of Blood Cell Morphology},
-  author={Deltadahl, Simon and Gilbey, Julian and Van Laer, Christine and Boeckx, Nancy and Leers, Mathie and Freeman, Tanya and Aiken, Laura and Farren, Timothy and Smith, Matt and Zeina, Mohamad and {BloodCounts! consortium} and Piazzese, Concetta and Taylor, Joseph and Gleadall, Nicholas and Schönlieb, Carola-Bibiane and Sivapalaratnam, Suthesh and Roberts, Michael and Nachev, Parashkev},
+  author={Deltadahl, Simon and Gilbey, Julian and Van Laer, Christine and Boeckx, Nancy and Leers, Mathie and Freeman, Tanya and Aiken, Laura and Farren, Timothy and Smith, Matt and Zeina, Mohamad and {BloodCounts! consortium} and Rudd, James HF and Piazzese, Concetta and Taylor, Joseph and Gleadall, Nicholas and Schönlieb, Carola-Bibiane and Sivapalaratnam, Suthesh and Roberts, Michael and Nachev, Parashkev},
   journal={arXiv preprint arXiv:2408.08982},
   year={2024}
 }
